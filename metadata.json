@@ -1,0 +1,6 @@
+{
+  "name": "Portal de Trabalhos Escolares",
+  "description": "Sistema seguro de armazenamento e gestão de trabalhos escolares com autenticação administrativa, upload de arquivos, controle de categorias, prazos e relatórios de atividades.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

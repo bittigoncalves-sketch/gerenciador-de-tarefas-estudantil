@@ -1,0 +1,17 @@
+{
+  "assignments": [],
+  "categories": [],
+  "activityLogs": [
+    {
+      "id": "act-init-1",
+      "action": "LOGIN",
+      "entity": "Sistema",
+      "description": "Ambiente escolar pronto para cadastro de disciplinas e trabalhos.",
+      "userName": "administrador",
+      "timestamp": "2026-08-31T15:45:00.000Z",
+      "ipAddress": "127.0.0.1 (Localhost)",
+      "status": "sucesso",
+      "securityHash": "init_clean_system"
+    }
+  ]
+}
