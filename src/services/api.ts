@@ -1,4 +1,5 @@
-import type { Assignment, ActivityLog, CategoryItem, StatsSummary, AssignmentFile } from '../types';
+import type { Assignment, ActivityLog, CategoryItem, StatsSummary, AssignmentFile, SecurityStatus } from '../types';
+import { localBackend } from './localBackend';
 
 const API_BASE = '/api';
 
@@ -14,7 +15,14 @@ export function setAuthToken(token: string | null): void {
   }
 }
 
+// Track whether the backend server is reachable or if we are in Netlify/Static standalone mode
+let isStaticHostingMode = false;
+
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+  if (isStaticHostingMode) {
+    throw new Error('STATIC_HOSTING_MODE');
+  }
+
   const token = getAuthToken();
   const headers = new Headers(options.headers || {});
 
@@ -26,41 +34,66 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     headers.set('Authorization', `Bearer ${token}`);
   }
 
-  const response = await fetch(`${API_BASE}${endpoint}`, {
-    ...options,
-    headers,
-  });
+  try {
+    const response = await fetch(`${API_BASE}${endpoint}`, {
+      ...options,
+      headers,
+    });
 
-  if (!response.ok) {
-    let errorMsg = 'Erro na requisição';
-    try {
-      const errJson = await response.json();
-      errorMsg = errJson.error || errJson.message || errorMsg;
-    } catch {
-      errorMsg = `Status ${response.status}: ${response.statusText}`;
+    const contentType = response.headers.get('content-type') || '';
+
+    // If Netlify or static server returns index.html or 404
+    if (contentType.includes('text/html') || response.status === 404) {
+      isStaticHostingMode = true;
+      throw new Error('STATIC_HOSTING_MODE');
     }
-    throw new Error(errorMsg);
-  }
 
-  return response.json();
+    if (!response.ok) {
+      let errorMsg = 'Erro na requisição';
+      try {
+        const errJson = await response.json();
+        errorMsg = errJson.error || errJson.message || errorMsg;
+      } catch {
+        errorMsg = `Status ${response.status}: ${response.statusText}`;
+      }
+      throw new Error(errorMsg);
+    }
+
+    return await response.json();
+  } catch (err: any) {
+    if (err.message === 'STATIC_HOSTING_MODE' || err.message?.includes('Failed to fetch') || err.name === 'TypeError') {
+      isStaticHostingMode = true;
+      throw new Error('STATIC_HOSTING_MODE');
+    }
+    throw err;
+  }
 }
 
 export const api = {
   // Auth
   async login(username: string, password: string): Promise<{ success: boolean; token: string; user: { username: string; role: string } }> {
-    const res = await request<{ success: boolean; token: string; user: { username: string; role: string } }>('/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ username, password }),
-    });
-    if (res.token) {
-      setAuthToken(res.token);
+    try {
+      const res = await request<{ success: boolean; token: string; user: { username: string; role: string } }>('/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ username, password }),
+      });
+      if (res.token) {
+        setAuthToken(res.token);
+      }
+      return res;
+    } catch (err: any) {
+      if (err.message === 'STATIC_HOSTING_MODE') {
+        return localBackend.login(username, password);
+      }
+      throw err;
     }
-    return res;
   },
 
   async logout(): Promise<void> {
     try {
       await request('/auth/logout', { method: 'POST' });
+    } catch {
+      await localBackend.logout();
     } finally {
       setAuthToken(null);
     }
@@ -70,7 +103,10 @@ export const api = {
     try {
       const res = await request<{ valid: boolean }>('/auth/verify');
       return res.valid;
-    } catch {
+    } catch (err: any) {
+      if (err.message === 'STATIC_HOSTING_MODE') {
+        return localBackend.verifyAuth();
+      }
       return false;
     }
   },
@@ -93,75 +129,89 @@ export const api = {
     const queryString = query.toString() ? `?${query.toString()}` : '';
     try {
       const data = await request<{ total: number; assignments: Assignment[] }>(`/assignments${queryString}`);
-      if (!params || (!params.search && params.category === 'todas' && params.status === 'todos')) {
-        try {
-          localStorage.setItem('cached_assignments', JSON.stringify(data.assignments));
-        } catch {
-          // Ignore localStorage quota
-        }
-      }
       return data;
-    } catch (err) {
-      // Offline / network fallback from cached storage
-      const cached = localStorage.getItem('cached_assignments');
-      if (cached) {
-        try {
-          const parsed = JSON.parse(cached);
-          return { total: parsed.length, assignments: parsed };
-        } catch {
-          // ignore
-        }
+    } catch (err: any) {
+      if (err.message === 'STATIC_HOSTING_MODE') {
+        return localBackend.getAssignments(params);
       }
       throw err;
     }
   },
 
   async getAssignment(id: string): Promise<Assignment> {
-    return request<Assignment>(`/assignments/${id}`);
+    try {
+      return await request<Assignment>(`/assignments/${id}`);
+    } catch (err: any) {
+      if (err.message === 'STATIC_HOSTING_MODE') {
+        return localBackend.getAssignment(id);
+      }
+      throw err;
+    }
   },
 
   async createAssignment(data: Partial<Assignment>): Promise<Assignment> {
-    const res = await request<Assignment>('/assignments', {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
-    return res;
+    try {
+      const res = await request<Assignment>('/assignments', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      });
+      return res;
+    } catch (err: any) {
+      if (err.message === 'STATIC_HOSTING_MODE') {
+        return localBackend.createAssignment(data);
+      }
+      throw err;
+    }
   },
 
   async updateAssignment(id: string, data: Partial<Assignment>): Promise<Assignment> {
-    const res = await request<Assignment>(`/assignments/${id}`, {
-      method: 'PUT',
-      body: JSON.stringify(data),
-    });
-    return res;
+    try {
+      const res = await request<Assignment>(`/assignments/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      });
+      return res;
+    } catch (err: any) {
+      if (err.message === 'STATIC_HOSTING_MODE') {
+        return localBackend.updateAssignment(id, data);
+      }
+      throw err;
+    }
   },
 
   async deleteAssignment(id: string): Promise<{ success: boolean; message: string }> {
-    return request<{ success: boolean; message: string }>(`/assignments/${id}`, {
-      method: 'DELETE',
-    });
+    try {
+      return await request<{ success: boolean; message: string }>(`/assignments/${id}`, {
+        method: 'DELETE',
+      });
+    } catch (err: any) {
+      if (err.message === 'STATIC_HOSTING_MODE') {
+        return localBackend.deleteAssignment(id);
+      }
+      throw err;
+    }
   },
 
   async deleteFile(assignmentId: string, fileId: string): Promise<{ success: boolean; files: AssignmentFile[] }> {
-    return request<{ success: boolean; files: AssignmentFile[] }>(`/assignments/${assignmentId}/files/${fileId}`, {
-      method: 'DELETE',
-    });
+    try {
+      return await request<{ success: boolean; files: AssignmentFile[] }>(`/assignments/${assignmentId}/files/${fileId}`, {
+        method: 'DELETE',
+      });
+    } catch (err: any) {
+      if (err.message === 'STATIC_HOSTING_MODE') {
+        return localBackend.deleteFile(assignmentId, fileId);
+      }
+      throw err;
+    }
   },
 
   // Stats & Activities
   async getStats(): Promise<StatsSummary> {
     try {
-      const stats = await request<StatsSummary>('/stats');
-      try {
-        localStorage.setItem('cached_stats', JSON.stringify(stats));
-      } catch {}
-      return stats;
-    } catch (err) {
-      const cached = localStorage.getItem('cached_stats');
-      if (cached) {
-        try {
-          return JSON.parse(cached);
-        } catch {}
+      return await request<StatsSummary>('/stats');
+    } catch (err: any) {
+      if (err.message === 'STATIC_HOSTING_MODE') {
+        return localBackend.getStats();
       }
       throw err;
     }
@@ -174,66 +224,108 @@ export const api = {
     if (params?.search) query.set('search', params.search);
 
     const queryString = query.toString() ? `?${query.toString()}` : '';
-    return request<{ total: number; logs: ActivityLog[] }>(`/activities${queryString}`);
+    try {
+      return await request<{ total: number; logs: ActivityLog[] }>(`/activities${queryString}`);
+    } catch (err: any) {
+      if (err.message === 'STATIC_HOSTING_MODE') {
+        return localBackend.getActivities(params);
+      }
+      throw err;
+    }
   },
 
   // Categories
   async getCategories(): Promise<CategoryItem[]> {
     try {
-      const categories = await request<CategoryItem[]>('/categories');
-      try {
-        localStorage.setItem('cached_categories', JSON.stringify(categories));
-      } catch {}
-      return categories;
-    } catch (err) {
-      const cached = localStorage.getItem('cached_categories');
-      if (cached) {
-        try {
-          return JSON.parse(cached);
-        } catch {}
+      return await request<CategoryItem[]>('/categories');
+    } catch (err: any) {
+      if (err.message === 'STATIC_HOSTING_MODE') {
+        return localBackend.getCategories();
       }
       throw err;
     }
   },
 
   async createCategory(name: string, color?: string): Promise<CategoryItem> {
-    return request<CategoryItem>('/categories', {
-      method: 'POST',
-      body: JSON.stringify({ name, color }),
-    });
+    try {
+      return await request<CategoryItem>('/categories', {
+        method: 'POST',
+        body: JSON.stringify({ name, color }),
+      });
+    } catch (err: any) {
+      if (err.message === 'STATIC_HOSTING_MODE') {
+        return localBackend.createCategory(name, color);
+      }
+      throw err;
+    }
   },
 
   async deleteCategory(id: string): Promise<{ success: boolean; message: string }> {
-    return request<{ success: boolean; message: string }>(`/categories/${id}`, {
-      method: 'DELETE',
-    });
+    try {
+      return await request<{ success: boolean; message: string }>(`/categories/${id}`, {
+        method: 'DELETE',
+      });
+    } catch (err: any) {
+      if (err.message === 'STATIC_HOSTING_MODE') {
+        return localBackend.deleteCategory(id);
+      }
+      throw err;
+    }
   },
 
   // Backup & Restore
   async restoreBackup(backupData: any): Promise<{ success: boolean; count: number }> {
-    return request<{ success: boolean; count: number }>('/restore', {
-      method: 'POST',
-      body: JSON.stringify({ backupData }),
-    });
+    try {
+      return await request<{ success: boolean; count: number }>('/restore', {
+        method: 'POST',
+        body: JSON.stringify({ backupData }),
+      });
+    } catch (err: any) {
+      if (err.message === 'STATIC_HOSTING_MODE') {
+        return localBackend.restoreBackup(backupData);
+      }
+      throw err;
+    }
   },
 
   // Database Management & Metrics
   async getDatabaseStatus(): Promise<any> {
-    return request<any>('/database/status');
+    try {
+      return await request<any>('/database/status');
+    } catch (err: any) {
+      if (err.message === 'STATIC_HOSTING_MODE') {
+        return localBackend.getDatabaseStatus();
+      }
+      throw err;
+    }
   },
 
   async optimizeDatabase(): Promise<{ success: boolean; message: string; recordsProcessed: number; timestamp: string }> {
-    return request<{ success: boolean; message: string; recordsProcessed: number; timestamp: string }>('/database/optimize', {
-      method: 'POST',
-    });
+    try {
+      return await request<{ success: boolean; message: string; recordsProcessed: number; timestamp: string }>('/database/optimize', {
+        method: 'POST',
+      });
+    } catch (err: any) {
+      if (err.message === 'STATIC_HOSTING_MODE') {
+        return localBackend.optimizeDatabase();
+      }
+      throw err;
+    }
   },
 
   // Code Tools & Java Runtime Simulation
   async analyzeCode(code: string, language?: string): Promise<any> {
-    return request<any>('/code/analyze', {
-      method: 'POST',
-      body: JSON.stringify({ code, language }),
-    });
+    try {
+      return await request<any>('/code/analyze', {
+        method: 'POST',
+        body: JSON.stringify({ code, language }),
+      });
+    } catch (err: any) {
+      if (err.message === 'STATIC_HOSTING_MODE') {
+        return localBackend.analyzeCode(code, language);
+      }
+      throw err;
+    }
   },
 
   async simulateCodeRun(code: string, language?: string, fileName?: string): Promise<{
@@ -248,21 +340,42 @@ export const api = {
     durationMs: number;
     analysis?: any;
   }> {
-    return request<any>('/code/simulate-run', {
-      method: 'POST',
-      body: JSON.stringify({ code, language, fileName }),
-    });
+    try {
+      return await request<any>('/code/simulate-run', {
+        method: 'POST',
+        body: JSON.stringify({ code, language, fileName }),
+      });
+    } catch (err: any) {
+      if (err.message === 'STATIC_HOSTING_MODE') {
+        return localBackend.simulateCodeRun(code, language, fileName);
+      }
+      throw err;
+    }
   },
 
   // Security Firewall & Intrusion Prevention API
-  async getSecurityStatus(): Promise<any> {
-    return request<any>('/security/status');
+  async getSecurityStatus(): Promise<SecurityStatus> {
+    try {
+      return await request<SecurityStatus>('/security/status');
+    } catch (err: any) {
+      if (err.message === 'STATIC_HOSTING_MODE') {
+        return localBackend.getSecurityStatus();
+      }
+      throw err;
+    }
   },
 
   async unlockIp(ip: string): Promise<{ success: boolean; message: string }> {
-    return request<{ success: boolean; message: string }>('/security/unlock-ip', {
-      method: 'POST',
-      body: JSON.stringify({ ip }),
-    });
+    try {
+      return await request<{ success: boolean; message: string }>('/security/unlock-ip', {
+        method: 'POST',
+        body: JSON.stringify({ ip }),
+      });
+    } catch (err: any) {
+      if (err.message === 'STATIC_HOSTING_MODE') {
+        return localBackend.unlockIp(ip);
+      }
+      throw err;
+    }
   }
 };
